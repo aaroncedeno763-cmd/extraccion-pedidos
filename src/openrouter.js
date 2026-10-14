@@ -1,4 +1,4 @@
-async function main(correo) {
+async function main(correo, modelo = 'openai/gpt-oss-120b') {
   const inicio = Date.now();
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
@@ -7,11 +7,11 @@ async function main(correo) {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'openai/gpt-oss-120b',
+      model: modelo, maxTokens: 8000,
       messages: [
         {
           role: 'system',
-          content: 'Extrae del correo todos los productos solicitados. No inventes datos ni deduzcas cantidades o unidades. Para cada producto devuelve nombre, cantidad como número o null si no se indica, y unidad como texto o null si no se indica claramente (por ejemplo: cajas, kg, bolsas o unidades). Si falta la cantidad, añade una pregunta concreta en "dudas" para pedirla. Si falta la unidad o no queda claro qué significa la cantidad, también añade una pregunta concreta en "dudas"; no supongas que "3 merluzas" significa 3 piezas ni que una cantidad sin unidad corresponde a kg, cajas u otra medida. Si el correo corrige o cancela una cantidad, conserva solo la instrucción final vigente. Si hay productos repetidos, suma las cantidades solo cuando sus unidades coincidan claramente; si no, mantenlos separados y explica la duda. Devuelve únicamente un JSON válido con esta estructura: {"productos":[{"nombre":"merluza fresca","cantidad":3,"unidad":"cajas"}],"dudas":[]}.',
+          content: 'Extrae del correo todos los productos solicitados. No inventes datos ni deduzcas cantidades, unidades ni códigos. Para cada producto devuelve nombre, referencia, codigo_articulo, cantidad y unidad. El nombre debe contener solo el nombre y la descripción del producto, sin los códigos ni la cantidad del pedido. Si aparecen columnas "Referencia" y "Artículo", copia sus códigos en "referencia" y "codigo_articulo", respectivamente. Devuelve los códigos como texto para conservar ceros iniciales; si un código no aparece, usa null. La cantidad debe ser un número o null si no se indica. La unidad debe ser texto o null si no se indica claramente (por ejemplo: cajas, kg, bolsas o unidades). Si falta la cantidad, añade una pregunta concreta en "dudas" para pedirla. Si falta la unidad o no queda claro qué significa la cantidad, también añade una pregunta concreta en "dudas"; no supongas que "3 merluzas" significa 3 piezas ni que una cantidad sin unidad corresponde a kg, cajas u otra medida. Si el correo corrige o cancela una cantidad, conserva solo la instrucción final vigente. Si hay productos repetidos, suma las cantidades solo cuando sus unidades coincidan claramente; si no, mantenlos separados y explica la duda. Si el correo indica que el pedido está en un adjunto, pero el contenido del adjunto no está incluido, no inventes productos y explica en "dudas" que falta el adjunto. Devuelve únicamente un JSON válido con esta estructura: {"productos":[{"nombre":"merluza fresca","referencia":"09040500","codigo_articulo":"000344","cantidad":3,"unidad":"cajas"}],"dudas":[]}.',
         },
         {
           role: 'user',

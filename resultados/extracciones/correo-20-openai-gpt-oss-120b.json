@@ -1,0 +1,60 @@
+{
+  "correo": 20,
+  "asunto": "TRENDHOTEL ALCUDIA. Pedido 1044",
+  "remitente": "economato@canpicafortpalace.com",
+  "modelo": "openai/gpt-oss-120b",
+  "extraccion": {
+    "productos": [
+      {
+        "nombre": "CALABACIN RELLENO ESPINACAS C/ 6 KG CONG.",
+        "referencia": "09040500",
+        "codigo_articulo": "000344",
+        "cantidad": 2,
+        "unidad": "cajas"
+      },
+      {
+        "nombre": "CHURROS LAZO CONG. C/ 4 KG (KG)",
+        "referencia": "09050050",
+        "codigo_articulo": "000843",
+        "cantidad": 1,
+        "unidad": "cajas"
+      },
+      {
+        "nombre": "COSTILLAS DE MAIZ \"CORN RIBS\"",
+        "referencia": "09012001",
+        "codigo_articulo": "002198",
+        "cantidad": 1,
+        "unidad": "cajas"
+      },
+      {
+        "nombre": "MUSAKA CONG. C/ 5X1 8 KG",
+        "referencia": "09040122",
+        "codigo_articulo": "000351",
+        "cantidad": 1,
+        "unidad": "cajas"
+      },
+      {
+        "nombre": "PIMIENTO RELLENO CARNE C/ 6 KG",
+        "referencia": "9041025",
+        "codigo_articulo": "000360",
+        "cantidad": 1,
+        "unidad": "cajas"
+      },
+      {
+        "nombre": "SALTEADO / MEZCLA PUNTAS DE ESPARRAGOS CONG. C/ 6 KG",
+        "referencia": "09020211",
+        "codigo_articulo": "000279",
+        "cantidad": 1,
+        "unidad": "cajas"
+      },
+      {
+        "nombre": "BUÑUELOS BACALAO C/ 4 KG",
+        "referencia": "09040480",
+        "codigo_articulo": "000364",
+        "cantidad": 1,
+        "unidad": "cajas"
+      }
+    ],
+    "dudas": []
+  }
+}
