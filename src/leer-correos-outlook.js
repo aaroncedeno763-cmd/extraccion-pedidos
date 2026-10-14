@@ -1,139 +1,221 @@
-// BORRADOR: ejemplo de cómo podría conectarse el proyecto con Outlook.
-// Aún no se puede ejecutar: falta configurar el acceso de Microsoft y conectar
-// la clasificación y la lectura de adjuntos.
-
+// Lee correos nuevos de Outlook, los clasifica y extrae los pedidos.
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const crypto = require('node:crypto');
+const { PublicClientApplication } = require('@azure/msal-node');
+const { clasificarCorreo } = require('./categorizar-correos');
 const { main: extraerPedido } = require('./openrouter');
 
-// Dirección de Microsoft Graph, el servicio que permite leer el buzón de Outlook.
+const carpetaResultados = path.join(__dirname, '..', 'resultados', 'correos-outlook');
+const archivoProcesados = path.join(__dirname, '..', 'resultados', 'correos-procesados.json');
+const archivoCache = path.join(__dirname, '..', 'resultados', 'outlook-token-cache.json');
 const graphUrl = 'https://graph.microsoft.com/v1.0';
+const modeloExtraccion = process.env.MODELO_EXTRACCION || 'openai/gpt-oss-120b';
 
-// Archivo local donde guardaremos los IDs que ya se han procesado.
-const archivoProcesados = path.join(
-  __dirname,
-  '..',
-  'resultados',
-  'correos-procesados.json'
-);
+// Guarda los tokens de inicio de sesión para no pedir autorización cada vez.
+const cachePlugin = {
+  beforeCacheAccess: async (context) => {
+    try {
+      context.tokenCache.deserialize(await fs.readFile(archivoCache, 'utf8'));
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  },
+  afterCacheAccess: async (context) => {
+    if (context.cacheHasChanged) {
+      await fs.mkdir(path.dirname(archivoCache), { recursive: true });
+      await fs.writeFile(archivoCache, context.tokenCache.serialize(), 'utf8');
+    }
+  },
+};
 
-async function leerIdsProcesados() {
+async function obtenerToken(correoBuzon) {
+  if (!process.env.OUTLOOK_CLIENT_ID) {
+    throw new Error('Falta OUTLOOK_CLIENT_ID en el archivo .env. Consulta las instrucciones de configuración.');
+  }
+
+  const aplicacion = new PublicClientApplication({
+    auth: {
+      clientId: process.env.OUTLOOK_CLIENT_ID,
+      authority: `https://login.microsoftonline.com/${process.env.OUTLOOK_TENANT_ID || 'organizations'}`,
+    },
+    cache: { cachePlugin },
+  });
+  const cuentas = await aplicacion.getTokenCache().getAllAccounts();
+  const cuenta = cuentas.find((item) => item.username.toLowerCase() === correoBuzon.toLowerCase());
+
+  if (cuenta) {
+    try {
+      const token = await aplicacion.acquireTokenSilent({
+        account: cuenta,
+        scopes: ['User.Read', 'Mail.Read'],
+      });
+      return token.accessToken;
+    } catch {
+      // Si ha caducado, solicitamos de nuevo el inicio de sesión.
+    }
+  }
+
+  console.log('Inicia sesión con la cuenta de Outlook que quieres leer:');
+  const token = await aplicacion.acquireTokenByDeviceCode({
+    scopes: ['User.Read', 'Mail.Read'],
+    deviceCodeCallback: (respuesta) => console.log(respuesta.message),
+  });
+  if (token.account?.username && token.account.username.toLowerCase() !== correoBuzon.toLowerCase()) {
+    throw new Error(`Has iniciado sesión con ${token.account.username}, pero pediste ${correoBuzon}.`);
+  }
+  return token.accessToken;
+}
+
+async function graphGet(url, token) {
+  const respuesta = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Prefer: 'outlook.body-content-type="text"',
+    },
+  });
+  if (!respuesta.ok) {
+    throw new Error(`Microsoft Graph respondió HTTP ${respuesta.status}: ${await respuesta.text()}`);
+  }
+  return respuesta.json();
+}
+
+async function leerCorreosNuevos(token) {
+  const url = new URL(`${graphUrl}/me/mailFolders/inbox/messages`);
+  url.searchParams.set('$filter', 'isRead eq false');
+  url.searchParams.set('$select', 'id,subject,from,body,hasAttachments,receivedDateTime');
+  url.searchParams.set('$top', '50');
+
+  const correos = [];
+  let siguiente = url.toString();
+  while (siguiente) {
+    const pagina = await graphGet(siguiente, token);
+    correos.push(...(pagina.value || []));
+    siguiente = pagina['@odata.nextLink'];
+  }
+  return correos;
+}
+
+async function obtenerAdjuntos(correo, token) {
+  if (!correo.hasAttachments) return { pdfs: [], texto: '', nombres: [], dudas: [] };
+  const url = `${graphUrl}/me/messages/${encodeURIComponent(correo.id)}/attachments`;
+  const datos = await graphGet(url, token);
+  const resultado = { pdfs: [], texto: '', nombres: [], dudas: [] };
+
+  for (const adjunto of datos.value || []) {
+    if (adjunto.isInline || !adjunto.contentBytes) continue;
+    resultado.nombres.push(adjunto.name || 'archivo sin nombre');
+    const contenido = Buffer.from(adjunto.contentBytes, 'base64');
+    const extension = path.extname(adjunto.name || '').toLowerCase();
+
+    if (extension === '.pdf' || adjunto.contentType === 'application/pdf') {
+      if (contenido.length > 15 * 1024 * 1024) {
+        resultado.dudas.push(`El PDF ${adjunto.name} supera 15 MB y no se ha enviado al modelo.`);
+      } else {
+        resultado.pdfs.push({ nombre: adjunto.name || 'pedido.pdf', contenido });
+      }
+    } else if (['.txt', '.csv'].includes(extension)) {
+      resultado.texto += `\n\nContenido del archivo ${adjunto.name}:\n${contenido.toString('utf8')}`;
+    } else {
+      resultado.dudas.push(`No se ha podido leer automáticamente el adjunto ${adjunto.name || '(sin nombre)'} (${adjunto.contentType || 'formato desconocido'}).`);
+    }
+  }
+  return resultado;
+}
+
+async function leerProcesados() {
   try {
-    // Si ya existe el archivo, leemos la lista para evitar repetir correos.
-    const texto = await fs.readFile(archivoProcesados, 'utf8');
-    return JSON.parse(texto);
+    return JSON.parse(await fs.readFile(archivoProcesados, 'utf8'));
   } catch (error) {
-    // La primera vez todavía no existe, así que empezamos con una lista vacía.
     if (error.code === 'ENOENT') return [];
     throw error;
   }
 }
 
-async function guardarIdsProcesados(ids) {
-  // Crea la carpeta resultados si aún no existe.
-  await fs.mkdir(path.dirname(archivoProcesados), { recursive: true });
-
-  // Guarda los IDs en un JSON para recordarlos la próxima vez.
-  await fs.writeFile(archivoProcesados, JSON.stringify(ids, null, 2), 'utf8');
+async function guardarResultado(correo, categoria, adjuntos, extraccion) {
+  await fs.mkdir(carpetaResultados, { recursive: true });
+  const resultado = {
+    id: correo.id,
+    asunto: correo.subject || '',
+    remitente: correo.from?.emailAddress?.address || '',
+    recibido: correo.receivedDateTime || null,
+    categoría: categoria,
+    adjuntos: adjuntos.nombres,
+    ...(extraccion ? { extraccion } : {}),
+  };
+  const nombre = `${crypto.createHash('sha1').update(correo.id).digest('hex')}.json`;
+  await fs.writeFile(path.join(carpetaResultados, nombre), JSON.stringify(resultado, null, 2), 'utf8');
 }
 
-async function leerCorreosOutlook(token) {
-  // Pide a Outlook los últimos 20 correos no leídos de la bandeja de entrada.
-  const url = new URL(`${graphUrl}/me/mailFolders/inbox/messages`);
-  url.searchParams.set('$filter', 'isRead eq false');
-  url.searchParams.set('$select', 'id,subject,from,body,hasAttachments,receivedDateTime');
-  url.searchParams.set('$top', '20');
+async function revisarBuzon(correoBuzon) {
+  const token = await obtenerToken(correoBuzon);
+  const procesados = await leerProcesados();
+  const nuevos = await leerCorreosNuevos(token);
+  let cantidad = 0;
 
-  const respuesta = await fetch(url, {
-    headers: {
-      // Este token se obtiene al iniciar sesión y dar permiso de lectura del correo.
-      Authorization: `Bearer ${token}`,
-      // Solicita el cuerpo en texto para que sea más fácil enviarlo al modelo.
-      Prefer: 'outlook.body-content-type="text"',
-    },
-  });
+  for (const correo of nuevos) {
+    if (procesados.includes(correo.id)) continue;
+    const asunto = correo.subject || '(sin asunto)';
+    console.log(`Procesando: ${asunto}`);
 
-  if (!respuesta.ok) {
-    throw new Error(`Microsoft Graph respondió HTTP ${respuesta.status}`);
+    try {
+      const categoria = await clasificarCorreo({
+        subject: correo.subject || '',
+        from: correo.from?.emailAddress?.address || '',
+        body: correo.body?.content || '',
+      });
+      let adjuntos = { pdfs: [], texto: '', nombres: [], dudas: [] };
+      let extraccion;
+
+      if (categoria === 'Pedidos') {
+        adjuntos = await obtenerAdjuntos(correo, token);
+        const texto = `Asunto: ${correo.subject || ''}\nRemitente: ${correo.from?.emailAddress?.address || ''}\n\n${correo.body?.content || ''}${adjuntos.texto}`;
+        extraccion = await extraerPedido(texto, modeloExtraccion, adjuntos.pdfs);
+        if (adjuntos.dudas.length) extraccion.dudas.push(...adjuntos.dudas);
+        if (adjuntos.nombres.length && adjuntos.pdfs.length === 0 && !adjuntos.texto) {
+          extraccion.dudas.push('El pedido puede estar en un adjunto que este programa no puede leer todavía.');
+        }
+      }
+
+      await guardarResultado(correo, categoria, adjuntos, extraccion);
+      procesados.push(correo.id);
+      await fs.mkdir(path.dirname(archivoProcesados), { recursive: true });
+      await fs.writeFile(archivoProcesados, JSON.stringify(procesados, null, 2), 'utf8');
+      cantidad += 1;
+      console.log(`Guardado (${categoria}).`);
+    } catch (error) {
+      // Si falla, no guardamos el ID como procesado: se intentará en la siguiente revisión.
+      console.error(`Error con "${asunto}": ${error.message}`);
+    }
   }
-
-  const datos = await respuesta.json();
-  return datos.value || [];
-}
-
-async function clasificarCorreo(correo) {
-  // Aquí se conectaría la función clasificarCorreo del archivo
-  // categorizar-correos.js. Ahora mismo ese archivo ejecuta todo el JSON
-  // directamente y habría que prepararlo para poder reutilizar su función.
-  throw new Error('Pendiente conectar la función de clasificación.');
-}
-
-async function leerTextoAdjuntos(token, correo) {
-  // Si no hay adjuntos, no hace falta consultar otra vez a Outlook.
-  if (!correo.hasAttachments) return '';
-
-  // Pide a Microsoft Graph la lista de archivos adjuntos de este correo.
-  const url = `${graphUrl}/me/messages/${correo.id}/attachments`;
-  const respuesta = await fetch(url, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-
-  if (!respuesta.ok) {
-    throw new Error(`No se pudieron leer los adjuntos: HTTP ${respuesta.status}`);
-  }
-
-  const datos = await respuesta.json();
-
-  // Aquí se descargarían los archivos y se leería su contenido.
-  // Por ejemplo, un PDF necesita convertirse a texto antes de usar OpenRouter.
-  // El formato real (PDF, Excel, imagen) determinará qué lector usar.
-  console.log(`El correo tiene ${datos.value?.length || 0} adjunto(s).`);
-  throw new Error('Pendiente descargar y convertir los adjuntos a texto.');
+  console.log(`Revisión terminada. Correos procesados: ${cantidad}.`);
 }
 
 async function main() {
-  // El token no debe escribirse directamente en el código.
-  const token = process.env.MICROSOFT_ACCESS_TOKEN;
-  if (!token) {
-    throw new Error('Falta configurar MICROSOFT_ACCESS_TOKEN para Outlook.');
+  const correoBuzon = process.argv.slice(2).find((argumento) => !argumento.startsWith('--'))
+    || process.env.OUTLOOK_EMAIL;
+  if (!correoBuzon) {
+    throw new Error('Indica el correo: node --env-file=.env src/leer-correos-outlook.js usuario@empresa.com');
+  }
+  if (!process.env.OPENROUTER_API_KEY) {
+    throw new Error('Falta OPENROUTER_API_KEY en .env.');
   }
 
-  // Carga los IDs procesados y solicita correos nuevos a Outlook.
-  const idsProcesados = await leerIdsProcesados();
-  const correos = await leerCorreosOutlook(token);
-
-  for (const correo of correos) {
-    // Si ya vimos este mensaje, lo saltamos.
-    if (idsProcesados.includes(correo.id)) continue;
-
-    console.log(`Procesando: ${correo.subject || '(sin asunto)'}`);
-
-    // Primero se clasifica el correo para decidir qué hacer con él.
-    const categoria = await clasificarCorreo(correo);
-
-    if (categoria === 'Pedidos') {
-      // El cuerpo del correo se combina con el texto extraído de los adjuntos.
-      const textoAdjuntos = await leerTextoAdjuntos(token, correo);
-      const cuerpo = correo.body?.content || '';
-      const textoPedido = `Asunto: ${correo.subject}\n\n${cuerpo}\n\n${textoAdjuntos}`;
-
-      // Envía solo este correo al modelo, no toda la bandeja de entrada.
-      const pedido = await extraerPedido(textoPedido);
-      console.log(JSON.stringify(pedido, null, 2));
-
-      // TODO: guardar el pedido en un archivo JSON como hacemos en las pruebas.
+  const soloUnaVez = process.argv.includes('--once');
+  do {
+    await revisarBuzon(correoBuzon);
+    if (!soloUnaVez) {
+      console.log('Esperando un minuto para revisar otra vez...');
+      await new Promise((resolver) => setTimeout(resolver, 60_000));
     }
-
-    // Se marca como procesado incluso si no era un pedido, para no repetirlo.
-    idsProcesados.push(correo.id);
-    await guardarIdsProcesados(idsProcesados);
-  }
-
-  console.log('Revisión terminada.');
+  } while (!soloUnaVez);
 }
 
-// Muestra los errores de forma sencilla en la consola.
-main().catch((error) => {
-  console.error(error.message);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { revisarBuzon };

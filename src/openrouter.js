@@ -1,5 +1,16 @@
-async function main(correo, modelo = 'openai/gpt-oss-120b') {
+async function main(correo, modelo = 'openai/gpt-oss-120b', archivosPdf = []) {
   const inicio = Date.now();
+  const contenidoUsuario = [{ type: 'text', text: correo }];
+  for (const archivo of archivosPdf) {
+    contenidoUsuario.push({
+      type: 'file',
+      file: {
+        filename: archivo.nombre,
+        file_data: `data:application/pdf;base64,${archivo.contenido.toString('base64')}`,
+      },
+    });
+  }
+
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -7,7 +18,7 @@ async function main(correo, modelo = 'openai/gpt-oss-120b') {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: modelo, maxTokens: 8000,
+      model: modelo, max_tokens: 8000,
       messages: [
         {
           role: 'system',
@@ -15,10 +26,13 @@ async function main(correo, modelo = 'openai/gpt-oss-120b') {
         },
         {
           role: 'user',
-          content: correo,
+          content: contenidoUsuario,
         },
       ],
       response_format: { type: 'json_object' },
+      ...(archivosPdf.length > 0 ? {
+        plugins: [{ id: 'file-parser', pdf: { engine: 'cloudflare-ai' } }],
+      } : {}),
     }),
   });
 

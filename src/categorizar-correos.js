@@ -43,8 +43,8 @@ Devuelve solo el nombre de la categoría.`;
 
 async function clasificarCorreo(correo) {
   const asunto = correo.asunto || correo.subject || correo.tema || '';
-  const remitente = correo.remitente || correo.from || correo.sender || correo.de || '';
-  const contenido = correo.contenido || correo.body || correo.text || correo.texto || correo.mensaje || '';
+  const remitente = correo.remitente || correo.from?.emailAddress?.address || correo.from || correo.sender || correo.de || '';
+  const contenido = correo.contenido || correo.body?.content || correo.body || correo.text || correo.texto || correo.mensaje || '';
 
   let ultimoError = 'respuesta vacía o categoría no válida';
 
@@ -208,7 +208,11 @@ async function main() {
   console.log(`Archivos separados guardados en: ${rutaCarpetaSalida}`);
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = { clasificarCorreo, categorias };

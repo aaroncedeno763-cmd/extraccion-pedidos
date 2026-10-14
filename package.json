@@ -1,0 +1,12 @@
+{
+  "name": "extraccion-pedidos",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Clasificación de correos y extracción de pedidos de Outlook",
+  "scripts": {
+    "leer-outlook": "node --env-file=.env src/leer-correos-outlook.js"
+  },
+  "dependencies": {
+    "@azure/msal-node": "^3.8.10"
+  }
+}
