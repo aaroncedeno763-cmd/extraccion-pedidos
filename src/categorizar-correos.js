@@ -1,6 +1,10 @@
+// Módulos de Node.js para leer/escribir archivos y construir rutas válidas
+// en Windows, macOS y Linux.
 const fs = require('node:fs/promises');
 const path = require('node:path');
 
+// Categorías que puede devolver el modelo. Se usan también para comprobar
+// que la respuesta sea válida y para crear un archivo por categoría.
 const categorias = [
   'Pedidos',
   'Facturación',
@@ -14,6 +18,7 @@ const categorias = [
   'Comercial',
 ];
 
+// Nombre de archivo asociado a cada categoría (sin tildes ni espacios).
 const nombresArchivo = {
   Pedidos: 'pedidos',
   'Facturación': 'facturacion',
@@ -27,6 +32,8 @@ const nombresArchivo = {
   Comercial: 'comercial',
 };
 
+// Instrucciones enviadas al modelo para que use siempre las mismas categorías
+// y responda únicamente con el nombre de una de ellas.
 const prompt = `Clasifica el correo según el asunto, el remitente y el contenido.
 Elige una sola categoría:
 Pedidos: nuevos pedidos y solicitudes de productos, incluidos los pedidos que llegan mediante avisos automáticos de plataformas.
@@ -41,6 +48,8 @@ Logística: transporte, entregas y planificación de distribución.
 Comercial: presupuestos, consultas y otras comunicaciones comerciales.
 Devuelve solo el nombre de la categoría.`;
 
+// Envía un correo a OpenRouter y devuelve su categoría. Acepta varios nombres
+// de campo para poder trabajar con correos de distintas fuentes o formatos.
 async function clasificarCorreo(correo) {
   const asunto = correo.asunto || correo.subject || correo.tema || '';
   const remitente = correo.remitente || correo.from?.emailAddress?.address || correo.from || correo.sender || correo.de || '';
@@ -48,8 +57,11 @@ async function clasificarCorreo(correo) {
 
   let ultimoError = 'respuesta vacía o categoría no válida';
 
+  // Se permiten hasta tres intentos: los errores transitorios y las respuestas
+  // mal formadas pueden corregirse al volver a consultar el servicio.
   for (let intento = 1; intento <= 3; intento += 1) {
     try {
+      // Solicitud de clasificación al modelo configurado en OpenRouter.
       const respuesta = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -73,6 +85,8 @@ async function clasificarCorreo(correo) {
 
       if (!respuesta.ok) {
         const detalle = await respuesta.text();
+        // Un error 402 suele indicar que la cuenta no tiene crédito; repetirlo
+        // no ayuda, así que se sale del ciclo de reintentos.
         if (respuesta.status === 402) {
           try {
             const errorApi = JSON.parse(detalle);
@@ -86,6 +100,7 @@ async function clasificarCorreo(correo) {
       } else {
         const datos = await respuesta.json();
         const texto = datos.choices?.[0]?.message?.content;
+        // La API puede añadir puntuación; se quita antes de validar el nombre.
         const categoria = typeof texto === 'string'
           ? texto.trim().replace(/[.!]+$/, '')
           : '';
@@ -100,6 +115,7 @@ async function clasificarCorreo(correo) {
       ultimoError = error.message;
     }
 
+    // Espera creciente entre intentos para no saturar el servicio.
     if (intento < 3) {
       const espera = intento * 3000;
       console.log(`Reintentando correo "${asunto}" en ${espera / 1000} segundos...`);
@@ -110,11 +126,16 @@ async function clasificarCorreo(correo) {
   throw new Error(`No se pudo clasificar "${asunto}" después de 3 intentos. Último error: ${ultimoError}`);
 }
 
+// Convierte saltos de línea, tabuladores y espacios repetidos en espacios
+// simples para que el contenido del correo quede más legible en el resultado.
 function limpiarTexto(texto) {
   return texto.replace(/[\r\n\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
 }
 
+// Programa principal: lee un JSON de correos, los clasifica por grupos y
+// guarda un JSON independiente para cada categoría.
 async function main() {
+  // Argumentos: ruta del JSON de entrada y carpeta de resultados.
   const archivoEntrada = process.argv[2];
   const carpetaSalida = process.argv[3];
 
@@ -124,6 +145,8 @@ async function main() {
   }
 
   // Lee la clave guardada en .env si no está definida en el terminal.
+  // Permite ejecutar el script sin --env-file: carga la clave desde .env
+  // solo cuando el proceso aún no tiene OPENROUTER_API_KEY.
   if (!process.env.OPENROUTER_API_KEY) {
     const archivoEnv = path.join(__dirname, '..', '.env');
     const env = await fs.readFile(archivoEnv, 'utf8');
@@ -135,6 +158,8 @@ async function main() {
     throw new Error('No se encontró OPENROUTER_API_KEY en el archivo .env');
   }
 
+  // Acepta una lista JSON directamente o una lista dentro de correos, emails
+  // o messages para adaptarse a distintas exportaciones.
   const entrada = JSON.parse(await fs.readFile(archivoEntrada, 'utf8'));
   const nombreLista = ['correos', 'emails', 'messages'].find((nombre) =>
     Array.isArray(entrada[nombre])
@@ -145,6 +170,9 @@ async function main() {
     throw new Error('El JSON debe contener una lista de correos o una clave "correos".');
   }
 
+  // El archivo de progreso permite continuar tras una interrupción sin volver
+  // a pagar por correos ya clasificados. Se reutiliza solo si coincide la lista
+  // de identificadores y todas las categorías guardadas son válidas.
   const rutaCarpetaSalida = path.resolve(carpetaSalida);
   const archivoProgreso = `${rutaCarpetaSalida}.progreso.json`;
   await fs.mkdir(rutaCarpetaSalida, { recursive: true });
@@ -165,6 +193,8 @@ async function main() {
     if (error.code !== 'ENOENT') throw error;
   }
 
+  // Procesa cinco correos en paralelo por tanda y guarda el progreso al final
+  // de cada tanda. Así limita la concurrencia y reduce el trabajo perdido.
   for (let i = categoriasGuardadas.length; i < correos.length; i += 5) {
     const grupo = correos.slice(i, i + 5);
     const categoriasGrupo = await Promise.all(grupo.map(clasificarCorreo));
@@ -181,6 +211,7 @@ async function main() {
     );
   }
 
+  // Añade la categoría a cada correo y normaliza el campo body si es texto.
   const resultado = correos.map((correo, i) => {
     const correoFinal = { ...correo, categoría: categoriasGuardadas[i] };
     if (typeof correoFinal.body === 'string') {
@@ -189,6 +220,7 @@ async function main() {
     return correoFinal;
   });
 
+  // Crea un archivo por categoría, incluso si esa categoría no tuvo correos.
   for (const categoria of categorias) {
     const correosCategoria = resultado.filter(
       (correo) => correo.categoría === categoria
@@ -208,6 +240,8 @@ async function main() {
   console.log(`Archivos separados guardados en: ${rutaCarpetaSalida}`);
 }
 
+// Evita ejecutar el proceso principal cuando este archivo se importa desde
+// otro módulo; en ese caso solo se exportan las funciones y datos indicados.
 if (require.main === module) {
   main().catch((error) => {
     console.error(error.message);
@@ -215,4 +249,5 @@ if (require.main === module) {
   });
 }
 
+// Interfaz pública para que otros scripts puedan reutilizar la clasificación.
 module.exports = { clasificarCorreo, categorias };

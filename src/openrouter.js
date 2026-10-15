@@ -1,4 +1,8 @@
+// Envía el cuerpo del correo (y opcionalmente los PDF adjuntos) a OpenRouter
+// para obtener una lista estructurada de productos y preguntas pendientes.
 async function main(correo, modelo = 'openai/gpt-oss-120b', archivosPdf = []) {
+  // El formato multimodal de OpenRouter recibe el texto y cada PDF como partes
+  // del contenido del mensaje del usuario.
   const inicio = Date.now();
   const contenidoUsuario = [{ type: 'text', text: correo }];
   for (const archivo of archivosPdf) {
@@ -11,6 +15,8 @@ async function main(correo, modelo = 'openai/gpt-oss-120b', archivosPdf = []) {
     });
   }
 
+  // Construye la solicitud: modelo, instrucciones de extracción y formato JSON.
+  // El plugin de análisis de PDF solo se activa cuando hay archivos adjuntos.
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -36,6 +42,8 @@ async function main(correo, modelo = 'openai/gpt-oss-120b', archivosPdf = []) {
     }),
   });
 
+  // Si el servidor devuelve un error HTTP, incluye el detalle para facilitar
+  // el diagnóstico (por ejemplo, credenciales, modelo o límites de uso).
   if (!response.ok) {
     const detalle = await response.text();
     throw new Error(
@@ -43,9 +51,12 @@ async function main(correo, modelo = 'openai/gpt-oss-120b', archivosPdf = []) {
     );
   }
 
+  // Convierte la respuesta JSON del modelo en un objeto JavaScript.
   const data = await response.json();
   const pedido = JSON.parse(data.choices[0].message.content);
 
+  // Informa duración, uso de tokens y modelo efectivo para poder revisar
+  // el coste y el comportamiento de la petición.
   const tiempoMs = Date.now() - inicio;
   const uso = data.usage ?? {};
   console.log(`Tiempo total de respuesta: ${(tiempoMs / 1000).toFixed(2)} segundos`);
@@ -57,4 +68,5 @@ async function main(correo, modelo = 'openai/gpt-oss-120b', archivosPdf = []) {
   return pedido;
 }
 
+// Permite que otros scripts usen el extractor sin ejecutar nada al importarlo.
 module.exports = { main };

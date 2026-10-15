@@ -1,3 +1,7 @@
+// este archivo es solo un ejemplo rtodavia no lo he puesto a prueba es para poder conectar el correo y que revise 
+// los correos y que los extraiga los correos y se los envie a los otrs codigos
+
+
 // Lee correos nuevos de Outlook, los clasifica y extrae los pedidos.
 const fs = require('node:fs/promises');
 const path = require('node:path');
